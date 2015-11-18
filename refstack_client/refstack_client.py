@@ -308,7 +308,9 @@ class RefstackClient:
         self._prep_test()
         results_file = self._get_next_stream_subunit_output_file(
             self.tempest_dir)
-        cpid = self._get_cpid_from_keystone(self.conf)
+        cpid = self.args.cpid
+        if not cpid:
+            cpid = self._get_cpid_from_keystone(self.conf)
 
         self.logger.info("Starting Tempest test...")
         start_time = time.time()
@@ -569,6 +571,13 @@ def parse_cli_args(args=None):
                              help='After running Tempest, upload the test '
                                   'results to the default RefStack API server '
                                   'or the server specified by --url.')
+
+    parser_test.add_argument('--cpid',
+                             action='store',
+                             required=False,
+                             dest='cpid',
+                             type=str,
+                             help='Cloud ID to pass to RefStack API server.')
 
     # This positional argument will allow arbitrary arguments to be passed in
     # with the usage of '--'.
