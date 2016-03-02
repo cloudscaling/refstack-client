@@ -14,6 +14,7 @@
 #    under the License.
 #
 
+import hashlib
 import json
 import logging
 import os
@@ -23,7 +24,6 @@ import httmock
 import mock
 from mock import MagicMock
 import unittest
-
 
 import refstack_client.refstack_client as rc
 import refstack_client.list_parser as lp
@@ -67,7 +67,7 @@ class TestRefstackClient(unittest.TestCase):
                 argv.extend(('--', kwargs.get('test_cases', None)))
         return argv
 
-    def mock_keystone(self):
+    def mock_data(self):
         """
         Mock the Keystone client methods.
         """
@@ -75,24 +75,13 @@ class TestRefstackClient(unittest.TestCase):
                                          'endpoints': [{'id': 'test-id'}]}
         self.mock_identity_service_v3 = {'type': 'identity',
                                          'id': 'test-id'}
-        self.mock_ks2_client = MagicMock(
-            name='ks_client',
-            **{'auth_ref':
-               {'serviceCatalog': [self.mock_identity_service_v2]}}
-        )
-        self.mock_ks3_client = MagicMock(
-            name='ks_client',
-            **{'auth_ref':
-               {'catalog': [self.mock_identity_service_v3]}}
-        )
-        self.ks2_client_builder = self.patch(
-            'refstack_client.refstack_client.ksclient2.Client',
-            return_value=self.mock_ks2_client
-        )
-        self.ks3_client_builder = self.patch(
-            'refstack_client.refstack_client.ksclient3.Client',
-            return_value=self.mock_ks3_client
-        )
+        self.v2_config = {'auth_url': 'http://0.0.0.0:35357/v2.0/tokens',
+                          'auth_version': 'v2',
+                          'domain_name': 'Default',
+                          'password': 'test',
+                          'tenant_id': 'admin_tenant_id',
+                          'tenant_name': 'tenant_name',
+                          'username': 'admin'}
 
     def setUp(self):
         """
@@ -162,95 +151,6 @@ class TestRefstackClient(unittest.TestCase):
         expected_file = "/tempest/path/.testrepository/0"
         self.assertEqual(expected_file, output_file)
 
-    def test_get_cpid_from_keystone_with_tenant_id(self):
-        """
-        Test getting the CPID from Keystone using an admin tenant ID.
-        """
-        args = rc.parse_cli_args(self.mock_argv())
-        client = rc.RefstackClient(args)
-        client.tempest_dir = self.test_path
-        client._prep_test()
-        self.mock_keystone()
-        cpid = client._get_cpid_from_keystone(client.conf)
-        self.ks2_client_builder.assert_called_with(
-            username='admin', tenant_id='admin_tenant_id',
-            password='test', auth_url='0.0.0.0:35357/v2.0', insecure=False
-        )
-        self.assertEqual('test-id', cpid)
-
-    def test_get_cpid_from_keystone_with_tenant_name(self):
-        """
-        Test getting the CPID from Keystone using an admin tenant name.
-        """
-        args = rc.parse_cli_args(self.mock_argv())
-        client = rc.RefstackClient(args)
-        client.tempest_dir = self.test_path
-        client._prep_test()
-        client.conf.remove_option('identity', 'tenant_id')
-        client.conf.set('identity', 'tenant_name', 'tenant_name')
-        self.mock_keystone()
-        cpid = client._get_cpid_from_keystone(client.conf)
-        self.ks2_client_builder.assert_called_with(
-            username='admin', tenant_name='tenant_name',
-            password='test', auth_url='0.0.0.0:35357/v2.0', insecure=False
-        )
-        self.assertEqual('test-id', cpid)
-
-    def test_get_cpid_from_keystone_by_tenant_name_from_account_file(self):
-        """
-        Test getting a CPID from Keystone using an admin tenant name
-        from an accounts file.
-        """
-
-        args = rc.parse_cli_args(self.mock_argv())
-        client = rc.RefstackClient(args)
-        client.tempest_dir = self.test_path
-        client._prep_test()
-        client.conf.add_section('auth')
-        client.conf.set('auth',
-                        'test_accounts_file',
-                        '%s/test-accounts.yaml' % self.test_path)
-        self.mock_keystone()
-        cpid = client._get_cpid_from_keystone(client.conf)
-        self.ks2_client_builder.assert_called_with(
-            username='admin', tenant_name='tenant_name',
-            password='test', auth_url='0.0.0.0:35357/v2.0', insecure=False
-        )
-        self.assertEqual('test-id', cpid)
-
-    def test_get_cpid_from_keystone_by_tenant_id_from_account_file(self):
-        """
-        Test getting a CPID from Keystone using an admin tenant ID
-        from an accounts file.
-        """
-
-        accounts = [
-            {
-                'username': 'admin',
-                'tenant_id': 'tenant_id',
-                'password': 'test'
-            }
-        ]
-        self.patch(
-            'refstack_client.refstack_client.read_accounts_yaml',
-            return_value=accounts)
-
-        args = rc.parse_cli_args(self.mock_argv())
-        client = rc.RefstackClient(args)
-        client.tempest_dir = self.test_path
-        client._prep_test()
-        client.conf.add_section('auth')
-        client.conf.set('auth',
-                        'test_accounts_file',
-                        '%s/test-accounts.yaml' % self.test_path)
-        self.mock_keystone()
-        cpid = client._get_cpid_from_keystone(client.conf)
-        self.ks2_client_builder.assert_called_with(
-            username='admin', tenant_id='tenant_id',
-            password='test', auth_url='0.0.0.0:35357/v2.0', insecure=False
-        )
-        self.assertEqual('test-id', cpid)
-
     def test_get_cpid_account_file_not_found(self):
         """
         Test that the client will exit if an accounts file is specified,
@@ -266,11 +166,11 @@ class TestRefstackClient(unittest.TestCase):
                         'test_accounts_file',
                         '%s/some-file.yaml' % self.test_path)
 
-        self.mock_keystone()
+        self.mock_data()
         with self.assertRaises(SystemExit):
-            client._get_cpid_from_keystone(client.conf)
+            client._get_keystone_config(client.conf)
 
-    def test_get_cpid_account_file_empty(self):
+    def test_get_keystone_config_account_file_empty(self):
         """
         Test that the client will exit if an accounts file exists,
         but is empty.
@@ -289,106 +189,72 @@ class TestRefstackClient(unittest.TestCase):
                         'test_accounts_file',
                         '%s/some-file.yaml' % self.test_path)
 
-        self.mock_keystone()
+        self.mock_data()
         with self.assertRaises(SystemExit):
-            client._get_cpid_from_keystone(client.conf)
+            client._get_keystone_config(client.conf)
 
-    def test_get_cpid_from_keystone_insecure(self):
+    def test_get_keystone_config(self):
         """
-        Test getting the CPID from Keystone with the insecure arg passed in.
-        """
-        argv = self.mock_argv()
-        argv.append('--insecure')
-        args = rc.parse_cli_args(argv)
-        client = rc.RefstackClient(args)
-        client.tempest_dir = self.test_path
-        client._prep_test()
-        self.mock_keystone()
-        client._get_cpid_from_keystone(client.conf)
-        self.ks2_client_builder.assert_called_with(
-            username='admin', tenant_id='admin_tenant_id',
-            password='test', auth_url='0.0.0.0:35357/v2.0', insecure=True
-        )
-
-    def test_get_cpid_from_keystone_v3(self):
-        """
-        Test getting the CPID from Keystone API v3.
+        Test that keystone configs properly parsed.
         """
         args = rc.parse_cli_args(self.mock_argv())
         client = rc.RefstackClient(args)
         client.tempest_dir = self.test_path
         client._prep_test()
-        client.conf.remove_option('identity', 'tenant_id')
         client.conf.set('identity', 'tenant_name', 'tenant_name')
-        client.conf.set('identity-feature-enabled', 'api_v3', 'true')
-        self.mock_keystone()
-        cpid = client._get_cpid_from_keystone(client.conf)
-        self.ks3_client_builder.assert_called_with(
-            username='admin', tenant_name='tenant_name',
-            password='test', auth_url='0.0.0.0:35357/v3', insecure=False
-        )
-        self.assertEqual('test-id', cpid)
+        self.mock_data()
+        actual_result = client._get_keystone_config(client.conf)
+        expected_result = self.v2_config
+        self.assertEqual(expected_result, actual_result)
 
-    def test_get_cpid_from_keystone_v2_varying_catalogs(self):
+    def test_get_cpid_from_keystone_by_tenant_name_from_account_file(self):
         """
-        Test getting the CPID from keystone API v2 varying catalogs.
+        Test getting a CPID from Keystone using an admin tenant name
+        from an accounts file.
         """
-        argv = self.mock_argv()
-        args = rc.parse_cli_args(argv)
+        args = rc.parse_cli_args(self.mock_argv())
         client = rc.RefstackClient(args)
         client.tempest_dir = self.test_path
         client._prep_test()
+        client.conf.add_section('auth')
+        client.conf.set('auth',
+                        'test_accounts_file',
+                        '%s/test-accounts.yaml' % self.test_path)
+        self.mock_data()
+        actual_result = client._get_keystone_config(client.conf)
+        expected_result = None
+        self.assertEqual(expected_result, actual_result['tenant_id'])
+        accounts = [
+            {
+                'username': 'admin',
+                'tenant_id': 'tenant_id',
+                'password': 'test'
+            }
+        ]
+        self.patch(
+            'refstack_client.refstack_client.read_accounts_yaml',
+            return_value=accounts)
+        actual_result = client._get_keystone_config(client.conf)
+        self.assertEqual('tenant_id', actual_result['tenant_id'])
 
-        # Test when the identity endpoints is empty
-        self.mock_ks2_client = MagicMock(
-            name='ks_client',
-            **{'auth_ref':
-               {'serviceCatalog': [{'type': 'identity', 'endpoints': []}]}}
-        )
-        self.ks2_client_builder = self.patch(
-            'refstack_client.refstack_client.ksclient2.Client',
-            return_value=self.mock_ks2_client
-        )
-        with self.assertRaises(RuntimeError):
-            client._get_cpid_from_keystone(client.conf)
-
-        # Test when the catalog is empty
-        self.mock_ks2_client = MagicMock(
-            name='ks_client',
-            **{'auth_ref': {'serviceCatalog': []}}
-        )
-        self.ks2_client_builder = self.patch(
-            'refstack_client.refstack_client.ksclient2.Client',
-            return_value=self.mock_ks2_client
-        )
-        with self.assertRaises(RuntimeError):
-            client._get_cpid_from_keystone(client.conf)
-
-        # Test when there is no service catalog
-        self.mock_ks2_client = MagicMock(name='ks_client', **{'auth_ref': {}})
-        self.ks2_client_builder = self.patch(
-            'refstack_client.refstack_client.ksclient2.Client',
-            return_value=self.mock_ks2_client
-        )
-        with self.assertRaises(RuntimeError):
-            client._get_cpid_from_keystone(client.conf)
-
-        # Test when catalog has other non-identity services.
-        self.mock_ks2_client = MagicMock(
-            name='ks_client',
-            **{'auth_ref':
-                {'serviceCatalog': [{'type': 'compute',
-                                     'endpoints': [{'id': 'test-id1'}]},
-                                    {'type': 'identity',
-                                     'endpoints': [{'id': 'test-id2'}]}]}
-               }
-        )
-        self.ks2_client_builder = self.patch(
-            'refstack_client.refstack_client.ksclient2.Client',
-            return_value=self.mock_ks2_client
-        )
-        cpid = client._get_cpid_from_keystone(client.conf)
-        self.assertEqual('test-id2', cpid)
+    def test_generate_keystone_data(self):
+        """Test that correct data is generated."""
+        args = rc.parse_cli_args(self.mock_argv())
+        client = rc.RefstackClient(args)
+        client.tempest_dir = self.test_path
+        client._prep_test()
+        client.conf.set('identity', 'tenant_name', 'tenant_name')
+        self.mock_data()
+        configs = client._get_keystone_config(client.conf)
+        actual_results = client._generate_keystone_data(configs)
+        expected_results = ('v2', 'http://0.0.0.0:35357/v2.0/tokens',
+                            {'auth':
+                                {'passwordCredentials':
+                                    {
+                                        'username': 'admin', 'password': 'test'
+                                    },
+                                 'tenantId': 'admin_tenant_id'}})
+        self.assertEqual(expected_results, actual_results)
 
     def test_get_cpid_from_keystone_v3_varying_catalogs(self):
         """
@@ -401,54 +267,94 @@ class TestRefstackClient(unittest.TestCase):
         client.conf.remove_option('identity', 'tenant_id')
         client.conf.set('identity', 'tenant_name', 'tenant_name')
         client.conf.set('identity-feature-enabled', 'api_v3', 'true')
+        self.mock_data()
+        configs = client._get_keystone_config(client.conf)
+        auth_version, auth_url, content = \
+            client._generate_keystone_data(configs)
+        client._generate_cpid_from_endpoint = MagicMock()
 
         # Test when the identity ID is None.
-        self.mock_ks3_client = MagicMock(
-            name='ks_client',
-            **{'auth_ref': {'catalog': [{'type': 'identity', 'id': None}]}}
-        )
-        self.ks3_client_builder = self.patch(
-            'refstack_client.refstack_client.ksclient3.Client',
-            return_value=self.mock_ks3_client
-        )
-        with self.assertRaises(RuntimeError):
-            client._get_cpid_from_keystone(client.conf)
+        ks3_ID_None = {'token': {'catalog':
+                                 [{'type': 'identity', 'id': None}]}}
+
+        @httmock.all_requests
+        def keystone_api_v3_mock(url, request):
+            return httmock.response(201, ks3_ID_None)
+        with httmock.HTTMock(keystone_api_v3_mock):
+            client._get_cpid_from_keystone(auth_version, auth_url, content)
+            client._generate_cpid_from_endpoint.assert_called_with(auth_url)
 
         # Test when the catalog is empty.
-        self.mock_ks3_client = MagicMock(
-            name='ks_client',
-            **{'auth_ref': {'catalog': []}}
-        )
-        self.ks3_client_builder = self.patch(
-            'refstack_client.refstack_client.ksclient3.Client',
-            return_value=self.mock_ks3_client
-        )
-        with self.assertRaises(RuntimeError):
-            client._get_cpid_from_keystone(client.conf)
+        ks3_catalog_empty = {'token': {'catalog': []}}
+        client._generate_cpid_from_endpoint = MagicMock()
+
+        @httmock.all_requests
+        def keystone_api_v3_mock2(url, request):
+            return httmock.response(201, ks3_catalog_empty)
+        with httmock.HTTMock(keystone_api_v3_mock2):
+            client._get_cpid_from_keystone(auth_version, auth_url, content)
+            client._generate_cpid_from_endpoint.assert_called_with(auth_url)
 
         # Test when there is no service catalog.
-        self.mock_ks3_client = MagicMock(name='ks_client', **{'auth_ref': {}})
-        self.ks3_client_builder = self.patch(
-            'refstack_client.refstack_client.ksclient3.Client',
-            return_value=self.mock_ks3_client
-        )
-        with self.assertRaises(RuntimeError):
-            client._get_cpid_from_keystone(client.conf)
+        ks3_no_catalog = {'token': {}}
+        client._generate_cpid_from_endpoint = MagicMock()
+
+        @httmock.all_requests
+        def keystone_api_v3_mock3(url, request):
+            return httmock.response(201, ks3_no_catalog)
+        with httmock.HTTMock(keystone_api_v3_mock3):
+            client._get_cpid_from_keystone(auth_version, auth_url, content)
+            client._generate_cpid_from_endpoint.assert_called_with(auth_url)
 
         #Test when catalog has other non-identity services.
-        self.mock_ks3_client = MagicMock(
-            name='ks_client',
-            **{'auth_ref': {'catalog': [{'type': 'compute',
-                                         'id': 'test-id1'},
+        ks3_other_services = {'token': {'catalog': [{'type': 'compute',
+                                        'id': 'test-id1'},
                                         {'type': 'identity',
                                          'id': 'test-id2'}]}}
-        )
-        self.ks3_client_builder = self.patch(
-            'refstack_client.refstack_client.ksclient3.Client',
-            return_value=self.mock_ks3_client
-        )
-        cpid = client._get_cpid_from_keystone(client.conf)
-        self.assertEqual('test-id2', cpid)
+        client._generate_cpid_from_endpoint = MagicMock()
+
+        @httmock.all_requests
+        def keystone_api_v3_mock4(url, request):
+            return httmock.response(201, ks3_other_services)
+        with httmock.HTTMock(keystone_api_v3_mock4):
+            cpid = client._get_cpid_from_keystone(auth_version,
+                                                  auth_url,
+                                                  content)
+            self.assertFalse(client._generate_cpid_from_endpoint.called)
+            self.assertEqual('test-id2', cpid)
+
+    def test_get_cpid_from_keystone_failure_handled(self):
+        """Test that get cpid from keystone API failure handled."""
+        args = rc.parse_cli_args(self.mock_argv())
+        client = rc.RefstackClient(args)
+        client.tempest_dir = self.test_path
+        client._prep_test()
+        client.conf.set('identity', 'tenant_name', 'tenant_name')
+        client.logger.warning = MagicMock()
+        client._generate_cpid_from_endpoint = MagicMock()
+        self.mock_data()
+        configs = client._get_keystone_config(client.conf)
+        auth_version, url, content = client._generate_keystone_data(configs)
+
+        @httmock.urlmatch(netloc=r'(.*\.)?127.0.0.1$', path='/v2/tokens')
+        def keystone_api_mock(auth_version, url, request):
+            return None
+        with httmock.HTTMock(keystone_api_mock):
+            client._get_cpid_from_keystone(auth_version, url, content)
+            client._generate_cpid_from_endpoint.assert_called_with(url)
+
+    def test_generate_cpid_from_endpoint(self):
+        """
+        Test that an endpoint's hostname is properly hashed.
+        """
+        args = rc.parse_cli_args(self.mock_argv())
+        client = rc.RefstackClient(args)
+        cpid = client._generate_cpid_from_endpoint('http://some.url:5000/v2')
+        expected = hashlib.md5('some.url').hexdigest()
+        self.assertEqual(expected, cpid)
+
+        with self.assertRaises(ValueError):
+            client._generate_cpid_from_endpoint('some.url:5000/v2')
 
     def test_form_result_content(self):
         """
@@ -509,6 +415,26 @@ class TestRefstackClient(unittest.TestCase):
         mock_input.return_value = 'yes'
         self.assertTrue(client._user_query('42?'))
 
+    def test_upload_prompt(self):
+        """
+        Test the _upload_prompt method.
+        """
+        client = rc.RefstackClient(rc.parse_cli_args(self.mock_argv()))
+
+        # When user says yes.
+        client._user_query = MagicMock(return_value=True)
+        client.post_results = MagicMock()
+        client._upload_prompt({'some': 'data'})
+        client.post_results.assert_called_with(
+            'http://127.0.0.1', {'some': 'data'}, sign_with=None
+        )
+
+        # When user says no.
+        client._user_query = MagicMock(return_value=False)
+        client.post_results = MagicMock()
+        client._upload_prompt({'some': 'data'})
+        self.assertFalse(client.post_results.called)
+
     def test_post_results(self):
         """
         Test the post_results method, ensuring a requests call is made.
@@ -527,11 +453,9 @@ class TestRefstackClient(unittest.TestCase):
 
         with httmock.HTTMock(refstack_api_mock):
             client.post_results("http://127.0.0.1", content)
-
-        client.logger.info.assert_called_with(
-            'http://127.0.0.1/v1/results/ Response: '
-            '%s' % expected_response
-        )
+            client.logger.info.assert_called_with(
+                'http://127.0.0.1/v1/results/ Response: '
+                '%s' % expected_response)
 
     def test_post_results_with_sign(self):
         """
@@ -554,10 +478,9 @@ class TestRefstackClient(unittest.TestCase):
         with httmock.HTTMock(refstack_api_mock):
             client.post_results("http://127.0.0.1", content,
                                 sign_with=self.test_path + '/rsa_key')
-        client.logger.info.assert_called_with(
-            'http://127.0.0.1/v1/results/ Response: '
-            '%s' % expected_response
-        )
+            client.logger.info.assert_called_with(
+                'http://127.0.0.1/v1/results/ Response: '
+                '%s' % expected_response)
 
     def test_run_tempest(self):
         """
@@ -572,11 +495,13 @@ class TestRefstackClient(unittest.TestCase):
             'refstack_client.refstack_client.subprocess.Popen',
             return_value=MagicMock(returncode=0))
         self.patch("os.path.isfile", return_value=True)
-        self.mock_keystone()
+        self.mock_data()
         client.get_passed_tests = MagicMock(return_value=[{'name': 'test'}])
         client.logger.info = MagicMock()
         client._save_json_results = MagicMock()
         client.post_results = MagicMock()
+        client._get_keystone_config = MagicMock(
+            return_value=self.v2_config)
         client.test()
 
         mock_popen.assert_called_with(
@@ -602,10 +527,13 @@ class TestRefstackClient(unittest.TestCase):
             'refstack_client.refstack_client.subprocess.Popen',
             return_value=MagicMock(returncode=0))
         self.patch("os.path.isfile", return_value=True)
-        self.mock_keystone()
+        self.mock_data()
         client.get_passed_tests = MagicMock(return_value=['test'])
         client.post_results = MagicMock()
         client._save_json_results = MagicMock()
+        client._get_keystone_config = MagicMock(
+            return_value=self.v2_config)
+        client._get_cpid_from_keystone = MagicMock()
         client.test()
         mock_popen.assert_called_with(
             ['%s/run_tempest.sh' % self.test_path, '-C', self.conf_file_name,
@@ -631,10 +559,14 @@ class TestRefstackClient(unittest.TestCase):
             return_value=MagicMock(returncode=0)
         )
         self.patch("os.path.isfile", return_value=True)
-        self.mock_keystone()
+        self.mock_data()
         client.get_passed_tests = MagicMock(return_value=['test'])
         client.post_results = MagicMock()
         client._save_json_results = MagicMock()
+        client._get_keystone_config = MagicMock(
+            return_value=self.v2_config)
+        client._get_cpid_from_keystone = MagicMock(
+            return_value='test-id')
         client.test()
         mock_popen.assert_called_with(
             ['%s/run_tempest.sh' % self.test_path, '-C', self.conf_file_name,
@@ -662,12 +594,14 @@ class TestRefstackClient(unittest.TestCase):
             'refstack_client.refstack_client.subprocess.Popen',
             return_value=MagicMock(returncode=0))
         self.patch("os.path.isfile", return_value=True)
-        self.mock_keystone()
+        self.mock_data()
         client.get_passed_tests = MagicMock(return_value=[{'name': 'test'}])
         client._save_json_results = MagicMock()
         client.post_results = MagicMock()
         lp.TestListParser.get_normalized_test_list = MagicMock(
             return_value="/tmp/some-list")
+        client._get_keystone_config = MagicMock(
+            return_value=self.v2_config)
         client.test()
 
         lp.TestListParser.get_normalized_test_list.assert_called_with(
@@ -711,9 +645,13 @@ class TestRefstackClient(unittest.TestCase):
             'refstack_client.refstack_client.subprocess.Popen',
             return_value=MagicMock(returncode=0))
         self.patch("os.path.isfile", return_value=True)
-        self.mock_keystone()
+        self.mock_data()
         client.get_passed_tests = MagicMock(return_value=['test'])
         client._save_json_results = MagicMock()
+        client._get_keystone_config = MagicMock(
+            return_value=self.v2_config)
+        client._get_cpid_from_keystone = MagicMock(
+            return_value='test-id')
         client.test()
 
         mock_popen.assert_called_with(
@@ -734,11 +672,14 @@ class TestRefstackClient(unittest.TestCase):
         """
         self.patch('refstack_client.refstack_client.subprocess.Popen',
                    return_value=MagicMock(returncode=1))
-        self.mock_keystone()
         args = rc.parse_cli_args(self.mock_argv(verbose='-vv'))
         client = rc.RefstackClient(args)
         client.tempest_dir = self.test_path
+        self.mock_data()
         client.logger.error = MagicMock()
+        client._get_keystone_config = MagicMock(
+            return_value=self.v2_config)
+        client._get_cpid_from_keystone = MagicMock()
         client.test()
         self.assertTrue(client.logger.error.called)
 
@@ -757,6 +698,31 @@ class TestRefstackClient(unittest.TestCase):
         expected_json = {
             'duration_seconds': 0,
             'cpid': 'test-id',
+            'results': [
+                {'name': 'tempest.passed.test'},
+                {'name': 'tempest.tagged_passed.test',
+                 'uuid': '0146f675-ffbd-4208-b3a4-60eb628dbc5e'}
+            ]
+        }
+        client.post_results.assert_called_with('http://127.0.0.1',
+                                               expected_json,
+                                               sign_with='rsa_key')
+
+    def test_subunit_upload(self):
+        """
+        Test that the subunit upload command runs as expected.
+        """
+        upload_file_path = self.test_path + "/.testrepository/0"
+        args = rc.parse_cli_args(
+            self.mock_argv(command='upload-subunit', priv_key='rsa_key')
+            + ['--keystone-endpoint', 'http://0.0.0.0:5000/v2.0']
+            + [upload_file_path])
+        client = rc.RefstackClient(args)
+        client.post_results = MagicMock()
+        client.upload_subunit()
+        expected_json = {
+            'duration_seconds': 0,
+            'cpid': hashlib.md5('0.0.0.0').hexdigest(),
             'results': [
                 {'name': 'tempest.passed.test'},
                 {'name': 'tempest.tagged_passed.test',
@@ -841,3 +807,16 @@ class TestRefstackClient(unittest.TestCase):
         pubkey, signature = client._sign_pubkey()
         self.assertTrue(pubkey.startswith('ssh-rsa AAAA'))
         self.assertTrue(signature.startswith('413cb954'))
+
+    def test_set_env_params(self):
+        """
+        Test that the environment variables are correctly set.
+        """
+        args = rc.parse_cli_args(self.mock_argv())
+        client = rc.RefstackClient(args)
+        client.tempest_dir = self.test_path
+        client._prep_test()
+        conf_dir = os.path.abspath(os.path.dirname(self.conf_file_name))
+        conf_file = os.path.basename(self.conf_file_name)
+        self.assertEqual(os.environ.get('TEMPEST_CONFIG_DIR'), conf_dir)
+        self.assertEqual(os.environ.get('TEMPEST_CONFIG'), conf_file)
